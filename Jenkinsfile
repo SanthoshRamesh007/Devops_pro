@@ -20,7 +20,7 @@ pipeline {
 
         // Container ports
         TEST_PORT             = '8090'   // 8080 is reserved for Jenkins UI
-        PROD_PORT             = '80'
+        PROD_PORT             = '8000'
     }
 
     stages {
