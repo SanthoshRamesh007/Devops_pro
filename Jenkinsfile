@@ -20,7 +20,7 @@ pipeline {
 
         // Container ports
         TEST_PORT             = '8090'   // 8080 is reserved for Jenkins UI
-        PROD_PORT             = '8000'
+        PROD_PORT             = '80'
     }
 
     stages {
@@ -144,23 +144,7 @@ pipeline {
             }
         }
 
-        // ────────────────────────────────────────
-        // STAGE 7 — Approval Gate  (main only)
-        // Requires a human to approve before prod
-        // ────────────────────────────────────────
-        stage('Approval — Production Gate') {
-            when { branch 'main' }
-            steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    input(
-                        message: "🚀 Deploy ${env.FULL_IMAGE} to PRODUCTION?",
-                        ok: 'Deploy to Production',
-                        submitter: 'admin'
-                    )
-                }
-            }
-        }
-
+        // STAGE 7 Removed to fully automate production deployment
         // ────────────────────────────────────────
         // STAGE 8 — Deploy to EC2
         //   dev  → container: weather-dashboard-test  port 8080:80
