@@ -1,30 +1,44 @@
-# ---- Build Stage ----
-FROM node:18-alpine AS builder
+# ════════════════════════════════════════════════
+# Stage 1 – Builder  (Node 20 Alpine)
+# Installs deps and runs Vite production build
+# ════════════════════════════════════════════════
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Accept API key and env label as build-time args
+# (baked into the static JS bundle by Vite)
+ARG VITE_WEATHER_API_KEY
+ARG VITE_ENV_LABEL=production
+ENV VITE_WEATHER_API_KEY=${VITE_WEATHER_API_KEY}
+ENV VITE_ENV_LABEL=${VITE_ENV_LABEL}
+
+# Install dependencies first (layer cache friendly)
 COPY package*.json ./
-RUN npm install --production
+RUN npm install --legacy-peer-deps
 
+# Copy source and build
 COPY . .
+RUN npm run build
 
-# ---- Runtime Stage ----
-FROM node:18-alpine
+# ════════════════════════════════════════════════
+# Stage 2 – Runtime  (Nginx Alpine)
+# Serves the compiled static files; tiny footprint
+# ════════════════════════════════════════════════
+FROM nginx:1.25-alpine
 
-WORKDIR /app
+# Remove default Nginx config
+RUN rm /etc/nginx/conf.d/default.conf 2>/dev/null; \
+    rm -f /etc/nginx/nginx.conf
 
-# Create non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Copy our custom config and built assets
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-COPY --from=builder /app .
+EXPOSE 80
 
-RUN chown -R appuser:appgroup /app
+# Health check — hits the /health endpoint we defined in nginx.conf
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost/health || exit 1
 
-USER appuser
-
-EXPOSE 3000
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
-
-CMD ["node", "server.js"]
+CMD ["nginx", "-g", "daemon off;"]

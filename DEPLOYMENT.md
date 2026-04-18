@@ -1,37 +1,33 @@
 # Deployment Documentation
-## Task 19 — GitHub Branch-Based Deployment with Jenkins & Docker
+## WeatherSphere — React Weather Dashboard
+### Branch-Based CI/CD: Jenkins Multibranch + Docker + AWS EC2
 
 ---
 
-## Overview
-
-This document describes the CI/CD pipeline that enables **branch-based deployment**, automatically routing:
-
-| Git Branch | Target Environment | Docker Image Tag |
-|---|---|---|
-| `dev` | **Test** server | `test-<build_number>` |
-| `main` | **Production** server | `prod-<build_number>` |
-
----
-
-## Architecture Diagram
+## Architecture Overview
 
 ```
 GitHub Repository
-       │
-       ├── dev branch ──────────────────────────────────► TEST Environment
-       │       │                                          (test-server-ip:3000)
-       │    Jenkins
-       │    Pipeline
-       │       │
-       └── main branch ─────────────────────────────────► PRODUCTION Environment
-                                                          (prod-server-ip:3000)
+  │
+  ├── dev branch  ──► Jenkins ──► Docker build (TEST)  ──► EC2 :8080
+  │                    ↓
+  │              Lint + Test
+  │
+  └── main branch ──► Jenkins ──► Docker build (PROD) ──► Manual Approval ──► EC2 :80
 ```
 
 **Full pipeline flow:**
 ```
-Code Push → GitHub Webhook → Jenkins → Build & Test → Docker Build
-         → Docker Push (Docker Hub) → SSH Deploy to Server → Health Check
+Code Push
+  → GitHub Webhook
+  → Jenkins detects branch
+  → npm install → ESLint → Vitest
+  → docker build (Vite compiles React + bakes API key)
+  → docker push (Docker Hub)
+  → [main only: manual approval gate]
+  → SSH into EC2
+  → docker pull → docker stop/rm → docker run
+  → /health check → ✅ Done
 ```
 
 ---
@@ -40,131 +36,224 @@ Code Push → GitHub Webhook → Jenkins → Build & Test → Docker Build
 
 ```
 devops_pro/
-├── Jenkinsfile              ← Jenkins pipeline definition
-├── DEPLOYMENT.md            ← This documentation
+├── Jenkinsfile            ← 9-stage Jenkins Multibranch Pipeline
+├── DEPLOYMENT.md          ← This file
+├── README.md              ← Project overview
+├── .env.example           ← Environment variable template
 └── app/
-    ├── server.js            ← Node.js Express application
-    ├── package.json         ← Node.js dependencies
-    └── Dockerfile           ← Multi-stage Docker build
+    ├── Dockerfile         ← Multi-stage: Node 20 builder → Nginx Alpine runtime
+    ├── nginx.conf         ← SPA routing, health endpoint, gzip, security headers
+    ├── vite.config.js     ← Vite + Vitest
+    ├── package.json       ← React, Axios, Vitest, ESLint
+    ├── index.html
+    └── src/               ← React JSX source code
 ```
 
 ---
 
 ## Prerequisites
 
-### Jenkins Setup
-- Jenkins 2.x or later with the following plugins:
-  - **Pipeline** (default)
-  - **Git** plugin
-  - **Docker Pipeline** plugin
-  - **SSH Agent** plugin
-  - **Credentials Binding** plugin
+### 1. OpenWeatherMap API Key
 
-### Jenkins Credentials (Manage Jenkins → Credentials)
+1. Sign up at https://openweathermap.org/api (free tier)
+2. Navigate to **API Keys** tab and copy your key
+3. Wait ~10 minutes for activation
 
-| Credential ID | Type | Purpose |
+### 2. Jenkins Plugins Required
+
+| Plugin | Purpose |
+|--------|---------|
+| Pipeline | Core pipeline support |
+| Git + GitHub | Branch detection & webhooks |
+| Docker Pipeline | `docker build/push` in pipeline |
+| SSH Agent | SSH into EC2 for deployment |
+| Credentials Binding | Inject secrets into pipeline |
+
+### 3. Jenkins Credentials to Create
+
+Go to **Jenkins → Manage Jenkins → Credentials → (global) → Add Credential**
+
+| Credential ID | Type | Value |
 |---|---|---|
 | `docker-hub-credentials` | Username/Password | Docker Hub login |
-| `deploy-server-ssh` | SSH Private Key | SSH access to servers |
+| `weather-api-key` | Secret text | OpenWeatherMap API key |
+| `ec2-ssh-key` | SSH Username + Private Key | EC2 `.pem` key contents |
 
-### Server Requirements
-- Docker installed and running on both test and production servers
-- SSH access from Jenkins agent to both servers
-- Port `3000` open on both servers
+### 4. EC2 Instance Requirements
+
+- Ubuntu 20.04/22.04
+- Docker installed and running
+- Ports **22** (SSH), **80** (prod), **8080** (test) open in Security Group
+- Jenkins EC2 agent or SSH access from Jenkins server
 
 ---
 
-## Pipeline Stages
+## EC2 Docker Setup
 
-### Stage 1 — Checkout
-Checks out the repository from GitHub using the configured SCM.
+SSH into your EC2 instance and run:
 
-### Stage 2 — Build
-Installs Node.js dependencies via `npm install` inside the `app/` directory.
-
-### Stage 3 — Test
-Runs `npm test` to execute test suites before any Docker image is built.
-
-### Stage 4 — Docker Build & Push
-- Builds a Docker image from `app/Dockerfile`
-- Tags the image with the build number:
-  - `dev` branch → `your-username/devops-pro-app:test-<N>`
-  - `main` branch → `your-username/devops-pro-app:prod-<N>`
-- Also maintains a rolling `latest-test` / `latest-prod` tag
-- Pushes both tags to Docker Hub
-
-### Stage 5 — Deploy (Branch-Conditional)
-
-#### `dev` branch → Test Environment
 ```bash
-docker pull <image>
-docker stop devops-pro-test && docker rm devops-pro-test
-docker run -d --name devops-pro-test \
-  -p 3000:3000 \
-  -e NODE_ENV=test \
-  <image>
-```
+# Install Docker
+sudo apt update && sudo apt install -y docker.io
+sudo systemctl enable --now docker
 
-#### `main` branch → Production Environment
-- Includes a **manual approval gate** (10-minute timeout) before deployment
-- After approval:
-```bash
-docker pull <image>
-docker stop devops-pro-prod && docker rm devops-pro-prod
-docker run -d --name devops-pro-prod \
-  -p 3000:3000 \
-  -e NODE_ENV=production \
-  <image>
-```
+# Add ubuntu user to docker group (no sudo needed)
+sudo usermod -aG docker ubuntu
 
-### Stage 6 — Health Check
-Hits the `/health` endpoint after deployment to confirm the container is running correctly.
+# Log out and back in, then verify
+docker --version
+```
 
 ---
 
 ## Jenkins Job Setup
 
-### Step 1 — Create a Multibranch Pipeline Job
-1. Open Jenkins → **New Item**
-2. Select **Multibranch Pipeline**
-3. Name it `devops-pro-pipeline`
+### Step 1 — Create Multibranch Pipeline
+
+1. Jenkins → **New Item**
+2. Name: `weather-dashboard-pipeline`
+3. Type: **Multibranch Pipeline**
 
 ### Step 2 — Configure Branch Sources
-1. Under **Branch Sources**, click **Add Source → GitHub**
-2. Enter your repository URL (e.g., `https://github.com/your-username/devops_pro`)
-3. Add GitHub credentials if the repo is private
 
-### Step 3 — Configure Build Configuration
-- Set **Script Path** to `Jenkinsfile`
+1. Under **Branch Sources** → **Add Source → GitHub**
+2. Repository URL: `https://github.com/SanthoshRamesh007/devops_pro`
+3. Add GitHub credentials if private
 
-### Step 4 — Scan Repository
-- Click **Scan Repository Now**
-- Jenkins will detect `dev` and `main` branches and create sub-jobs automatically
+### Step 3 — Script Path
+
+- **Script Path**: `Jenkinsfile` ✅
+
+### Step 4 — Update Jenkinsfile
+
+Open `Jenkinsfile` and set your EC2 IP:
+```groovy
+EC2_HOST = 'YOUR_EC2_PUBLIC_IP'   // ← Set this
+```
+
+### Step 5 — Scan Repository
+
+Click **Scan Repository Now** — Jenkins will discover `dev` and `main` branches and create sub-jobs.
+
+### Step 6 — Configure GitHub Webhook
+
+In your GitHub repo → **Settings → Webhooks → Add webhook**:
+- Payload URL: `http://<jenkins-ip>:8080/github-webhook/`
+- Content type: `application/json`
+- Events: **Just the push event**
 
 ---
 
-## Customization — Values to Replace
+## Pipeline Stages
 
-Open `Jenkinsfile` and update the `environment` block:
+| # | Stage | Description |
+|---|-------|-------------|
+| 1 | Checkout | `checkout scm` — pulls the correct branch |
+| 2 | Install | `npm install` — installs React, Vite, Vitest, etc. |
+| 3 | Lint | `npm run lint` — ESLint checks JSX source |
+| 4 | Test | `npm test` — Vitest runs unit tests |
+| 5 | Docker Build | Multi-stage build; injects API key + env label via `--build-arg` |
+| 6 | Docker Push | Pushes versioned + `latest-test`/`latest-prod` tags to Docker Hub |
+| 7 | Approval Gate | **main only** — 10-minute timeout for manual approval in Jenkins UI |
+| 8 | Deploy to EC2 | SSH → `docker pull` → `docker stop/rm` → `docker run` |
+| 9 | Health Check | `curl /health` — confirms container is serving traffic |
 
-```groovy
-DOCKER_REGISTRY = 'your-dockerhub-username'   // Your Docker Hub username
-TEST_SERVER     = 'user@test-server-ip'        // SSH target for test server
-PROD_SERVER     = 'user@prod-server-ip'        // SSH target for production server
-```
+---
+
+## Branch → Environment Mapping
+
+| Git Branch | Container Name | EC2 Port | Docker Tag | ENV_LABEL |
+|---|---|---|---|---|
+| `dev` | `weather-dashboard-test` | **8080** | `test-<N>` | `TEST` |
+| `main` | `weather-dashboard-prod` | **80** | `prod-<N>` | `PRODUCTION` |
+
+The `VITE_ENV_LABEL` build-arg is baked into the React bundle at build time. The UI displays a **TEST ENV** badge for the dev build and a **✅ LIVE** badge for production.
 
 ---
 
 ## Docker Image Details
 
-The `Dockerfile` uses a **multi-stage build**:
-1. **Builder stage** — installs dependencies
-2. **Runtime stage** — lean production image (node:18-alpine)
+### Multi-Stage Build
 
-Security features:
-- Runs as a **non-root user** (`appuser`)
-- Built-in **HEALTHCHECK** directive
-- Uses Alpine Linux (minimal attack surface)
+```
+Stage 1 — Builder (node:20-alpine)
+  ├── COPY package*.json
+  ├── RUN npm install
+  ├── COPY src/
+  └── RUN npm run build   →  dist/  (Vite output)
+
+Stage 2 — Runtime (nginx:1.25-alpine)
+  ├── COPY nginx.conf
+  ├── COPY dist/ → /usr/share/nginx/html
+  ├── EXPOSE 80
+  └── HEALTHCHECK /health
+```
+
+**Image size**: ~25 MB (Alpine Nginx only — no Node.js, no source code in production image)
+
+### Docker Tags Published
+
+```
+santhoshramesh007/weather-dashboard:test-<N>      ← dev branch build
+santhoshramesh007/weather-dashboard:latest-test   ← rolling test tag
+
+santhoshramesh007/weather-dashboard:prod-<N>      ← main branch build
+santhoshramesh007/weather-dashboard:latest-prod   ← rolling prod tag
+```
+
+---
+
+## Manual Docker Commands (EC2)
+
+```bash
+# Check running containers
+docker ps
+
+# View logs
+docker logs weather-dashboard-test -f
+docker logs weather-dashboard-prod -f
+
+# Restart a container
+docker restart weather-dashboard-prod
+
+# Run test build manually (replace IP and API key)
+docker run -d \
+  --name weather-dashboard-test \
+  --restart unless-stopped \
+  -p 8080:80 \
+  santhoshramesh007/weather-dashboard:latest-test
+```
+
+---
+
+## Verification Checklist
+
+### Jenkins & Credentials
+- [ ] `docker-hub-credentials` added to Jenkins
+- [ ] `weather-api-key` (Secret Text) added to Jenkins
+- [ ] `ec2-ssh-key` SSH key added to Jenkins
+- [ ] `EC2_HOST` updated in `Jenkinsfile`
+
+### EC2 Instance
+- [ ] Docker installed and running (`docker --version`)
+- [ ] Port 80 open in Security Group (production)
+- [ ] Port 8080 open in Security Group (test)
+- [ ] Port 22 open for Jenkins SSH deployment
+
+### Pipeline Validation
+- [ ] Push to `dev` → builds TEST image → deploys to `:8080` → health check passes
+- [ ] Visit `http://<EC2_IP>:8080` → see weather dashboard with **TEST ENV** badge
+- [ ] Push to `main` → approval gate appears in Jenkins
+- [ ] Approve → deploys to `:80` → health check passes
+- [ ] Visit `http://<EC2_IP>` → see weather dashboard with **✅ LIVE** badge
+
+### App Functionality
+- [ ] Search for a city → real-time weather loads
+- [ ] Geolocation button → fetches current location weather
+- [ ] °C / °F toggle → values update
+- [ ] 24-hour chart renders with temperature + weather icons
+- [ ] 5-day forecast cards display
+- [ ] `/health` endpoint returns `{"status":"healthy"}`
 
 ---
 
@@ -172,33 +261,21 @@ Security features:
 
 ```
 dev branch push
-  └─► Jenkins detects push (webhook)
-       └─► Checkout → npm install → npm test
-            └─► docker build → docker push (tag: test-N)
-                 └─► SSH into TEST server
-                      └─► docker pull → docker stop/rm → docker run
-                           └─► /health check → ✅ Done
+  └► Jenkins detects (GitHub webhook)
+       └► Checkout → npm install → ESLint → Vitest
+            └► docker build (tag: test-N, ENV=TEST)
+                 └► docker push (Docker Hub)
+                      └► SSH → EC2
+                           └► docker pull → stop/rm → run -p 8080:80
+                                └► curl /health → ✅
 
 main branch push
-  └─► Jenkins detects push (webhook)
-       └─► Checkout → npm install → npm test
-            └─► docker build → docker push (tag: prod-N)
-                 └─► ⚠️  Manual approval required in Jenkins UI
-                      └─► SSH into PROD server
-                           └─► docker pull → docker stop/rm → docker run
-                                └─► /health check → ✅ Done
+  └► Jenkins detects (GitHub webhook)
+       └► Checkout → npm install → ESLint → Vitest
+            └► docker build (tag: prod-N, ENV=PRODUCTION)
+                 └► docker push (Docker Hub)
+                      └► ⚠️ Manual approval required (10 min)
+                           └► SSH → EC2
+                                └► docker pull → stop/rm → run -p 80:80
+                                     └► curl /health → ✅
 ```
-
----
-
-## Verification Checklist
-
-- [ ] Jenkins Multibranch Pipeline job created
-- [ ] `docker-hub-credentials` added to Jenkins credentials store
-- [ ] `deploy-server-ssh` SSH key added to Jenkins credentials store
-- [ ] `DOCKER_REGISTRY`, `TEST_SERVER`, `PROD_SERVER` values updated in `Jenkinsfile`
-- [ ] Docker installed on test and production servers
-- [ ] Firewall allows port `3000` on both servers
-- [ ] GitHub webhook configured (Jenkins URL + `/github-webhook/`)
-- [ ] `dev` branch triggers test deployment ✅
-- [ ] `main` branch triggers prod deployment with approval gate ✅
