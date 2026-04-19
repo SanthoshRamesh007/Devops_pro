@@ -4,6 +4,7 @@ import CurrentWeather  from './components/CurrentWeather.jsx';
 import WeatherDetails  from './components/WeatherDetails.jsx';
 import HourlyChart     from './components/HourlyChart.jsx';
 import ForecastCard    from './components/ForecastCard.jsx';
+import LiveClock       from './components/LiveClock.jsx';
 import { useWeather }  from './hooks/useWeather.js';
 import { groupForecastByDay, getHourlyData } from './utils/helpers.js';
 import './App.css';
@@ -67,6 +68,8 @@ export default function App() {
               </span>
             )}
           </div>
+          
+          <LiveClock />
 
           <SearchBar onSearch={handleSearch} onGeolocate={handleGeolocate} />
 
