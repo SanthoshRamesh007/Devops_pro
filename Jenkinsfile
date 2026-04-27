@@ -16,7 +16,7 @@ pipeline {
         // EC2 SSH access
         SSH_CREDENTIALS_ID    = 'ec2-ssh-key'             // Jenkins SSH credential ID
         EC2_USER              = 'ubuntu'                   // EC2 login user
-        EC2_HOST              = '3.109.221.200'             // EC2 Public IP
+        EC2_HOST              = '3.7.59.108'                // EC2 Public IP
 
         // Container ports
         TEST_PORT             = '8090'   // 8080 is reserved for Jenkins UI
